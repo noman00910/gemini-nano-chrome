@@ -24,7 +24,7 @@ const {
 
 const PORT = Number(process.env.PORT || 8788);
 
-const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MB
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 15 * 1024 * 1024); // 15 MiB; includes Base64 overhead
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -84,13 +84,14 @@ function sendError(res, err, req) {
 }
 
 function buildChatRequest(body) {
-  const { initialPrompts, promptText } = parseMessages(body.messages);
+  const { initialPrompts, promptText, promptParts } = parseMessages(body.messages);
   const responseConstraint = mapResponseFormat(body.response_format);
   const stopSequences = normalizeStop(body.stop);
   const hasSampling = body.temperature !== undefined && body.top_k !== undefined;
   return {
     initialPrompts,
     promptText,
+    promptParts,
     responseConstraint,
     temperature: hasSampling ? body.temperature : undefined,
     topK: hasSampling ? body.top_k : undefined,
