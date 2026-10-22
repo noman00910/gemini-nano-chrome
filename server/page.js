@@ -35,15 +35,47 @@ function buildCreateOptionsLiteral({ initialPrompts, temperature, topK }) {
 // temperature/topK must be supplied as a pair, and may not be honored at all
 // outside an Origin Trial or extension context. Falling back to a plain
 // create() keeps the request working either way instead of failing it.
-function buildExpression({ initialPrompts, promptText, responseConstraint, temperature, topK }, streamingBindingName) {
+function buildExpression({ initialPrompts, promptText, promptParts, responseConstraint, temperature, topK }, streamingBindingName) {
   const createOptsWithSampling = buildCreateOptionsLiteral({ initialPrompts, temperature, topK });
   const createOptsPlain = JSON.stringify(initialPrompts.length > 0 ? { initialPrompts } : {});
   const promptOpts = responseConstraint ? JSON.stringify({ responseConstraint }) : "{}";
   const promptLiteral = JSON.stringify(promptText);
+  const media = (promptParts || []).some((p) => p.type !== "text");
+  const partsLiteral = JSON.stringify(promptParts || [{type:"text", text:promptText}]);
+  const mediaCreateOptions = JSON.stringify({
+    ...(initialPrompts.length ? { initialPrompts } : {}),
+    expectedInputs: [
+      { type: "text", languages: ["en"] },
+      ...((promptParts || []).some(p => p.type === "image") ? [{type:"image"}] : []),
+      ...((promptParts || []).some(p => p.type === "audio") ? [{type:"audio"}] : [])
+    ],
+    expectedOutputs: [{type:"text", languages:["en"]}]
+  });
+  const mediaSetup = `
+    const wireParts = ${partsLiteral};
+    const content = [];
+    for (const p of wireParts) {
+      if (p.type === "text") content.push({type:"text", value:p.text});
+      else if (p.type === "image") {
+        const blob = await fetch(p.dataUrl).then(r => r.blob());
+        content.push({type:"image", value:blob});
+      } else if (p.type === "audio") {
+        const mime = p.format === "mp3" ? "audio/mpeg" : "audio/wav";
+        const bytes = await fetch("data:" + mime + ";base64," + p.data).then(r => r.arrayBuffer());
+        const ctx = new AudioContext();
+        try {
+          const buffer = await ctx.decodeAudioData(bytes);
+          content.push({type:"audio", value:buffer});
+        } finally { await ctx.close(); }
+      }
+    }
+    const input = [{role:"user", content}];
+  `;
+  const inputLiteral = media ? "input" : promptLiteral;
 
   const generation = streamingBindingName
     ? `
-      const stream = session.promptStreaming(${promptLiteral}, ${promptOpts});
+      const stream = session.promptStreaming(${inputLiteral}, ${promptOpts});
       let text = '';
       for await (const chunk of stream) {
         text += chunk;
@@ -51,17 +83,19 @@ function buildExpression({ initialPrompts, promptText, responseConstraint, tempe
       }
     `
     : `
-      const text = await session.prompt(${promptLiteral}, ${promptOpts});
+      const text = await session.prompt(${inputLiteral}, ${promptOpts});
     `;
 
   return `
     (async () => {
       let session;
+      ${media ? `session = await LanguageModel.create(${mediaCreateOptions});` : `
       try {
         session = await LanguageModel.create(${createOptsWithSampling});
       } catch (e) {
         session = await LanguageModel.create(${createOptsPlain});
-      }
+      }`}
+      ${media ? mediaSetup : ""}
       const before = session.contextUsage;
       ${generation}
       const after = session.contextUsage;

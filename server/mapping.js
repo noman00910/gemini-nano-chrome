@@ -49,7 +49,38 @@ function parseMessages(messages) {
     ? [{ role: "system", content: systemText }, ...history]
     : history;
 
-  return { initialPrompts, promptText: extractText(last.content) };
+  const promptParts = parseContentParts(last.content);
+  return { initialPrompts, promptText: extractText(last.content), promptParts };
+}
+
+// Reject unsupported media explicitly rather than silently treating it as text.
+// Remote image URLs are intentionally excluded pending SSRF-safe retrieval.
+function parseContentParts(content) {
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  if (!Array.isArray(content) || !content.length) throw new RequestError("message.content must be text or a non-empty array");
+  if (content.length > 12) throw new RequestError("too many content parts (maximum 12)");
+  let mediaCount = 0;
+  return content.map((part) => {
+    if (!part || typeof part !== "object") throw new RequestError("invalid content part");
+    if (part.type === "text" && typeof part.text === "string") return { type: "text", text: part.text };
+    if (part.type === "image_url" && typeof part.image_url?.url === "string") {
+      if (++mediaCount > 5) throw new RequestError("too many media parts (maximum 5)");
+      const url = part.image_url.url;
+      if (!/^data:image\/(png|jpeg|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/i.test(url)) {
+        throw new RequestError("image_url must contain a Base64 data URL (JPEG, PNG, WebP); external URLs not supported");
+      }
+      return { type: "image", dataUrl: url };
+    }
+    if (part.type === "input_audio" && typeof part.input_audio?.data === "string") {
+      if (++mediaCount > 5) throw new RequestError("too many media parts (maximum 5)");
+      const {data, format} = part.input_audio;
+      if (!["wav","mp3"].includes(format) || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || !data.length) {
+        throw new RequestError("input_audio requires valid Base64 data and wav/mp3 format");
+      }
+      return { type: "audio", data, format };
+    }
+    throw new RequestError("unsupported content part: " + (part.type ?? "unknown"));
+  });
 }
 
 function mapResponseFormat(responseFormat) {
@@ -137,6 +168,7 @@ module.exports = {
   RequestError,
   randomId,
   parseMessages,
+  parseContentParts,
   mapResponseFormat,
   normalizeStop,
   applyStop,
